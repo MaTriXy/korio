@@ -2,27 +2,18 @@ package com.soywiz.korio.vfs
 
 import com.soywiz.kds.lmapOf
 import com.soywiz.klock.DateTime
+import com.soywiz.kmem.getBits
 import com.soywiz.kmem.indexOf
-import com.soywiz.korio.async.AsyncSequence
+import com.soywiz.kmem.toUInt
+import com.soywiz.korio.async.SuspendingSequence
 import com.soywiz.korio.async.asyncGenerate
 import com.soywiz.korio.async.executeInWorker
 import com.soywiz.korio.compression.Inflater
-import com.soywiz.korio.coroutine.withCoroutineContext
 import com.soywiz.korio.stream.*
 import com.soywiz.korio.util.AsyncCloseable
-import com.soywiz.korio.util.getBits
 import com.soywiz.korio.util.toIntClamp
-import com.soywiz.korio.util.toUInt
-import kotlin.collections.MutableMap
 import kotlin.collections.component1
 import kotlin.collections.component2
-import kotlin.collections.contains
-import kotlin.collections.copyOfRange
-import kotlin.collections.getOrPut
-import kotlin.collections.indexOf
-import kotlin.collections.iterator
-import kotlin.collections.listOf
-import kotlin.collections.plus
 import kotlin.collections.set
 import kotlin.math.max
 
@@ -49,15 +40,15 @@ suspend fun ZipVfs(s: AsyncStream, zipFile: VfsFile? = null, caseSensitive: Bool
 	fun String.normalizeName() = if (caseSensitive) this.trim('/') else this.trim('/').toLowerCase()
 
 	class ZipEntry(
-		val path: String,
-		val compressionMethod: Int,
-		val isDirectory: Boolean,
-		val time: DosFileDateTime,
-		val offset: Int,
-		val inode: Long,
-		val headerEntry: AsyncStream,
-		val compressedSize: Long,
-		val uncompressedSize: Long
+			val path: String,
+			val compressionMethod: Int,
+			val isDirectory: Boolean,
+			val time: DosFileDateTime,
+			val offset: Int,
+			val inode: Long,
+			val headerEntry: AsyncStream,
+			val compressedSize: Long,
+			val uncompressedSize: Long
 	)
 
 	fun ZipEntry?.toStat(file: VfsFile): VfsStat {
@@ -116,15 +107,15 @@ suspend fun ZipVfs(s: AsyncStream, zipFile: VfsFile? = null, caseSensitive: Bool
 
 				val folder = filesPerFolder.getOrPut(baseFolder) { lmapOf() }
 				val entry = ZipEntry(
-					path = name,
-					compressionMethod = compressionMethod,
-					isDirectory = isDirectory,
-					time = DosFileDateTime(fileTime, fileDate),
-					inode = n.toLong(),
-					offset = headerOffset,
-					headerEntry = s.sliceWithStart(headerOffset.toUInt()),
-					compressedSize = compressedSize.toUInt(),
-					uncompressedSize = uncompressedSize.toUInt()
+						path = name,
+						compressionMethod = compressionMethod,
+						isDirectory = isDirectory,
+						time = DosFileDateTime(fileTime, fileDate),
+						inode = n.toLong(),
+						offset = headerOffset,
+						headerEntry = s.sliceWithStart(headerOffset.toUInt()),
+						compressedSize = compressedSize.toUInt(),
+						uncompressedSize = uncompressedSize.toUInt()
 				)
 				val components = listOf("") + PathInfo(normalizedName).getFullComponents()
 				for (m in 1 until components.size) {
@@ -184,8 +175,8 @@ suspend fun ZipVfs(s: AsyncStream, zipFile: VfsFile? = null, caseSensitive: Bool
 			return files[path.normalizeName()].toStat(this@Impl[path])
 		}
 
-		suspend override fun list(path: String): AsyncSequence<VfsFile> = withCoroutineContext {
-			asyncGenerate(this@withCoroutineContext) {
+		suspend override fun list(path: String): SuspendingSequence<VfsFile> {
+			return asyncGenerate {
 				for ((name, entry) in filesPerFolder[path.normalizeName()] ?: lmapOf()) {
 					//yield(entry.toStat(this@Impl[entry.path]))
 					yield(vfs[entry.path])

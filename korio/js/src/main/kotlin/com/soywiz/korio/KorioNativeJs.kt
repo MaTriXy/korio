@@ -30,6 +30,7 @@ import org.w3c.xhr.XMLHttpRequestResponseType
 import kotlin.browser.window
 import kotlin.coroutines.experimental.suspendCoroutine
 import kotlin.math.min
+import kotlin.reflect.KClass
 
 actual annotation class Synchronized
 actual annotation class JvmField
@@ -63,6 +64,8 @@ val isNodeJs by lazy { jsTypeOf(window) === "undefined" }
 actual object KorioNative {
 	actual val currentThreadId: Long = 1L
 
+	actual fun getClassSimpleName(clazz: KClass<*>): String = clazz.simpleName ?: "unknown"
+
 	actual abstract class NativeThreadLocal<T> {
 		actual abstract fun initialValue(): T
 		private var value = initialValue()
@@ -91,6 +94,7 @@ actual object KorioNative {
 
 	actual fun rootLocalVfs(): VfsFile = localVfs(".")
 	actual fun applicationVfs(): VfsFile = localVfs(".")
+	actual fun applicationDataVfs(): VfsFile = jsLocalStorageVfs.root
 	actual fun cacheVfs(): VfsFile = MemoryVfs()
 	actual fun externalStorageVfs(): VfsFile = localVfs(".")
 	actual fun userHomeVfs(): VfsFile = localVfs(".")
@@ -123,6 +127,10 @@ actual object KorioNative {
 	actual val websockets: WebSocketClientFactory by lazy { JsWebSocketClientFactory() }
 
 	actual val eventLoopFactoryDefaultImpl: EventLoopFactory = EventLoopFactoryJs()
+
+	actual suspend fun <T> executeInNewThread(callback: suspend () -> T): T {
+		return callback()
+	}
 
 	actual suspend fun <T> executeInWorker(callback: suspend () -> T): T {
 		return callback()
@@ -286,6 +294,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	suspend actual fun uncompressZlib(data: ByteArray): ByteArray = suspendCoroutine { c ->
@@ -305,6 +314,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	suspend actual fun uncompressZlibRaw(data: ByteArray): ByteArray = suspendCoroutine { c ->
@@ -324,6 +334,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	suspend actual fun compressGzip(data: ByteArray, level: Int): ByteArray = suspendCoroutine { c ->
@@ -345,6 +356,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	suspend actual fun compressZlib(data: ByteArray, level: Int): ByteArray = suspendCoroutine { c ->
@@ -367,6 +379,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	suspend actual fun compressZlibRaw(data: ByteArray, level: Int): ByteArray = suspendCoroutine { c ->
@@ -389,6 +402,7 @@ actual object KorioNative {
 				c.resume(out.toByteArray())
 			}
 		}
+		Unit
 	}
 
 	actual fun syncTest(block: suspend EventLoopTest.() -> Unit): Unit {
@@ -475,6 +489,7 @@ fun jsEmptyObj(): dynamic = js("({})")
 fun jsEmptyArray(): dynamic = js("([])")
 fun jsObjectKeys(obj: dynamic): dynamic = js("Object.keys(obj)")
 fun jsToArray(obj: dynamic): Array<Any?> = Array<Any?>(obj.length) { obj[it] }
+inline fun <reified T> jsToArrayT(obj: dynamic): Array<T> = Array<T>(obj.length) { obj[it] }
 fun jsObject(vararg pairs: Pair<String, Any?>): dynamic {
 	val out = jsEmptyObj()
 	for (pair in pairs) out[pair.first] = pair.second
@@ -516,7 +531,14 @@ class HttpClientBrowserJs : HttpClient() {
 			deferred.reject(kotlin.RuntimeException("Error ${xhr.status} opening $url"))
 		}
 
-		for (header in headers) xhr.setRequestHeader(header.first, header.second)
+		for (header in headers) {
+			val hnname = header.first.toLowerCase().trim()
+			when (hnname) {
+				"connection", "content-length" -> Unit // Refused to set unsafe header
+				else -> xhr.setRequestHeader(header.first, header.second)
+			}
+
+		}
 
 		deferred.onCancel { xhr.abort() }
 

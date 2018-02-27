@@ -1,3 +1,3 @@
 package com.soywiz.korio
 
-val KORIO_VERSION = "0.17.2-SNAPSHOT"
+internal const val KORIO_VERSION = "0.20.1-SNAPSHOT"

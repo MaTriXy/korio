@@ -3,9 +3,11 @@ package com.soywiz.korio.stream
 import com.soywiz.kds.Extra
 import com.soywiz.kmem.*
 import com.soywiz.korio.RuntimeException
+import com.soywiz.korio.error.invalidOp
 import com.soywiz.korio.lang.*
 import com.soywiz.korio.lang.tl.threadLocal
 import com.soywiz.korio.util.*
+import kotlin.math.max
 import kotlin.math.min
 
 interface SyncInputStream {
@@ -158,18 +160,28 @@ fun SyncStream.toByteArray(): ByteArray {
 class MemorySyncStreamBase(var data: ByteArrayBuffer) : SyncStreamBase() {
 	constructor(initialCapacity: Int = 4096) : this(ByteArrayBuffer(initialCapacity))
 
+	var ilength: Int
+		get() = data.size
+		set(value) = run { data.size = value }
+
 	override var length: Long
 		get() = data.size.toLong()
 		set(value) = run { data.size = value.toInt() }
 
+	fun checkPosition(position: Long) = run { if (position < 0) invalidOp("Invalid position $position") }
+
 	override fun read(position: Long, buffer: ByteArray, offset: Int, len: Int): Int {
-		val end = min(this.length, position + len)
-		val actualLen = (end - position).toInt()
-		arraycopy(this.data.data, position.toInt(), buffer, offset, actualLen)
+		checkPosition(position)
+		val ipos = position.toInt()
+		if (position !in 0 until ilength) return 0
+		val end = min(this.ilength, ipos + len)
+		val actualLen = max((end - ipos), 0)
+		arraycopy(this.data.data, ipos, buffer, offset, actualLen)
 		return actualLen
 	}
 
 	override fun write(position: Long, buffer: ByteArray, offset: Int, len: Int) {
+		checkPosition(position)
 		data.ensure((position + len).toInt())
 		arraycopy(buffer, offset, this.data.data, position.toInt(), len)
 	}
@@ -179,9 +191,13 @@ class MemorySyncStreamBase(var data: ByteArrayBuffer) : SyncStreamBase() {
 	override fun toString(): String = "MemorySyncStreamBase(${data.size})"
 }
 
-fun SyncStream.sliceWithStart(start: Long): SyncStream = sliceWithBounds(start, this.length)
-
+@Deprecated("Replace with sliceStart", ReplaceWith("sliceStart"))
 fun SyncStream.slice(): SyncStream = SyncStream(SliceSyncStreamBase(this.base, 0L, length))
+
+@Deprecated("Replace with sliceStart", ReplaceWith("sliceStart"))
+fun SyncStream.sliceWithStart(start: Long): SyncStream = sliceWithBounds(start, this.length)
+fun SyncStream.sliceStart(): SyncStream = sliceWithBounds(0L, this.length)
+fun SyncStream.sliceHere(): SyncStream = SyncStream(SliceSyncStreamBase(this.base, position, length))
 
 fun SyncStream.slice(range: IntRange): SyncStream = sliceWithBounds(range.start.toLong(), (range.endInclusive.toLong() + 1))
 fun SyncStream.slice(range: LongRange): SyncStream = sliceWithBounds(range.start, (range.endInclusive + 1))
@@ -355,7 +371,7 @@ fun SyncOutputStream.writeF64_be(v: Double): Unit = write(BYTES_TEMP.apply { BYT
 fun SyncStreamBase.toSyncStream(position: Long = 0L) = SyncStream(this, position)
 
 fun ByteArray.openSync(mode: String = "r"): SyncStream = MemorySyncStreamBase(ByteArrayBuffer(this)).toSyncStream(0L)
-fun ByteArray.openAsync(mode: String = "r"): AsyncStream = openSync(mode).toAsync()
+fun ByteArray.openAsync(mode: String = "r"): AsyncStream = MemoryAsyncStreamBase(ByteArrayBuffer(this)).toAsyncStream(0L)
 fun String.openAsync(charset: Charset = Charsets.UTF_8): AsyncStream = toByteArray(charset).openSync("r").toAsync()
 
 fun SyncOutputStream.writeStream(source: SyncInputStream): Unit = source.copyTo(this)

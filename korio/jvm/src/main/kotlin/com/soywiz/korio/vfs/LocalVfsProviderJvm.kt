@@ -1,10 +1,8 @@
 package com.soywiz.korio.vfs
 
-import com.soywiz.korio.async.*
-import com.soywiz.korio.coroutine.getCoroutineContext
-import com.soywiz.korio.coroutine.korioSuspendCoroutine
-import com.soywiz.korio.coroutine.withCoroutineContext
 import com.soywiz.kds.lmapOf
+import com.soywiz.korio.async.*
+import com.soywiz.korio.coroutine.korioSuspendCoroutine
 import com.soywiz.korio.stream.AsyncStream
 import com.soywiz.korio.stream.AsyncStreamBase
 import com.soywiz.korio.stream.toAsyncStream
@@ -128,52 +126,12 @@ class LocalVfsJvm : LocalVfs() {
 		}
 	}
 
-	suspend override fun list(path: String): AsyncSequence<VfsFile> {
-		/*
-		val emitter = AsyncSequenceEmitter<VfsFile>()
-		val files = executeInWorker { Files.newDirectoryStream(resolvePath(path)) }
-		spawnAndForget {
-			executeInWorker {
-				try {
-					for (p in files.toList().sortedBy { it.toFile().name }) {
-						val file = p.toFile()
-						emitter.emit(VfsFile(that, file.absolutePath))
-					}
-				} finally {
-					emitter.close()
-				}
-			}
-		}
-		return emitter.toSequence()
-		*/
-		return executeInWorker {
-			asyncGenerate(getCoroutineContext()) {
-				for (file in File(path).listFiles() ?: arrayOf()) {
-					yield(that.file("$path/${file.name}"))
-				}
-			}
-		}
-	}
-
-	suspend override fun mkdir(path: String, attributes: List<Attribute>): Boolean = executeInWorker {
-		resolveFile(path).mkdir()
-	}
-
-	suspend override fun touch(path: String, time: Long, atime: Long) {
-		resolveFile(path).setLastModified(time)
-	}
-
-	suspend override fun delete(path: String): Boolean = executeInWorker {
-		resolveFile(path).delete()
-	}
-
-	suspend override fun rmdir(path: String): Boolean {
-		return resolveFile(path).delete()
-	}
-
-	suspend override fun rename(src: String, dst: String): Boolean = executeInWorker {
-		resolveFile(src).renameTo(resolveFile(dst))
-	}
+	suspend override fun list(path: String): SuspendingSequence<VfsFile> = executeInWorker { (File(path).listFiles() ?: arrayOf()).map { that.file("$path/${it.name}") }.toAsync() }
+	suspend override fun mkdir(path: String, attributes: List<Attribute>): Boolean = executeInWorker { resolveFile(path).mkdirs() }
+	suspend override fun touch(path: String, time: Long, atime: Long): Unit = executeInWorker { resolveFile(path).setLastModified(time); Unit }
+	suspend override fun delete(path: String): Boolean = executeInWorker { resolveFile(path).delete() }
+	suspend override fun rmdir(path: String): Boolean = executeInWorker { resolveFile(path).delete() }
+	suspend override fun rename(src: String, dst: String): Boolean = executeInWorker { resolveFile(src).renameTo(resolveFile(dst)) }
 
 	inline suspend fun <T> completionHandler(crossinline callback: (CompletionHandler<T, Unit>) -> Unit) = korioSuspendCoroutine<T> { c ->
 		val cevent = c.toEventLoop()
@@ -183,14 +141,14 @@ class LocalVfsJvm : LocalVfs() {
 		})
 	}
 
-	suspend override fun watch(path: String, handler: (VfsFileEvent) -> Unit): com.soywiz.korio.lang.Closeable = withCoroutineContext {
+	suspend override fun watch(path: String, handler: (VfsFileEvent) -> Unit): com.soywiz.korio.lang.Closeable {
 		var running = true
 		val fs = FileSystems.getDefault()
 		val watcher = fs.newWatchService()
 
 		fs.getPath(path).register(watcher, StandardWatchEventKinds.ENTRY_CREATE, StandardWatchEventKinds.ENTRY_DELETE, StandardWatchEventKinds.ENTRY_MODIFY)
 
-		spawnAndForget(this@withCoroutineContext) {
+		spawnAndForget {
 			while (running) {
 				val key = executeInWorker {
 					var r: WatchKey?
@@ -226,7 +184,7 @@ class LocalVfsJvm : LocalVfs() {
 			}
 		}
 
-		return@withCoroutineContext com.soywiz.korio.lang.Closeable {
+		return com.soywiz.korio.lang.Closeable {
 			running = false
 			watcher.close()
 		}

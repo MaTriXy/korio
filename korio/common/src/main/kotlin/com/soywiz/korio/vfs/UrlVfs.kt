@@ -2,17 +2,19 @@ package com.soywiz.korio.vfs
 
 import com.soywiz.kds.lmapOf
 import com.soywiz.korio.error.invalidOp
+import com.soywiz.korio.net.URI
 import com.soywiz.korio.net.http.Http
 import com.soywiz.korio.net.http.HttpClient
 import com.soywiz.korio.net.http.createHttpClient
 import com.soywiz.korio.stream.*
 import com.soywiz.korio.util.LONG_ZERO_TO_MAX_RANGE
 
-fun UrlVfs(url: String): VfsFile = UrlVfs(url, Unit).root
+fun UrlVfs(url: String): VfsFile = UrlVfs(URI(url))
+fun UrlVfs(url: String, client: HttpClient): VfsFile = UrlVfs(URI(url), client)
+fun UrlVfs(url: URI, client: HttpClient = createHttpClient()): VfsFile = UrlVfs(url.copy(path = "", query = null).fullUri, Unit, client)[url.path]
 
-class UrlVfs(val url: String, val dummy: Unit) : Vfs() {
+class UrlVfs(val url: String, val dummy: Unit, val client: HttpClient = createHttpClient()) : Vfs() {
 	override val absolutePath: String = url
-	val client = createHttpClient()
 
 	fun getFullUrl(path: String) = url.trim('/') + '/' + path.trim('/')
 
@@ -42,12 +44,22 @@ class UrlVfs(val url: String, val dummy: Unit) : Vfs() {
 					fullUrl,
 					Http.Headers(lmapOf("range" to "bytes=$position-${position + len - 1}"))
 				)
-				val out = res.content.read(buffer, offset, len)
-				return out
+				val s = res.content
+				var coffset = offset
+				var pending = len
+				var totalRead = 0
+				while (pending > 0) {
+					val read = s.read(buffer, coffset, pending)
+					if (read < 0 && totalRead == 0) return read
+					if (read <= 0) break
+					pending -= read
+					totalRead += read
+					coffset += read
+				}
+				return totalRead
 			}
 
 			suspend override fun getLength(): Long = stat.size
-			//suspend override fun getLength(): Long = 0L
 		}.toAsyncStream().buffered()
 		//}.toAsyncStream()
 	}

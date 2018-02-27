@@ -2,6 +2,7 @@ package com.soywiz.korio.lang
 
 import com.soywiz.korio.vfs.VfsUtil
 
+@Deprecated("Use com.soywiz.korio.net.URI instead")
 data class URL private constructor(
 	val dummy: Boolean,
 	val protocol: String,
@@ -24,7 +25,11 @@ data class URL private constructor(
 		out.toString()
 	}
 
+	val fullUrl: String get() = str
+
 	override fun toString(): String = str
+
+	fun toComponentString(): String = "URL(protocol=$protocol, auth=$auth, host=$host, path=$path, query=$query)"
 
 	//fun withProtocol(protocol: String) = copy(protocol = protocol)
 	//fun withHost(host: String) = copy(host = host)
@@ -60,16 +65,20 @@ data class URL private constructor(
 				query = queryString
 			)
 		}
+
+		fun isAbsolute(base: String): Boolean = base.contains("://") || base.startsWith("/")
+
+		fun resolve(base: String, access: String): String = when {
+			isAbsolute(access) -> access
+			else -> URL(base + "/" + access).run { this.copy(path = VfsUtil.normalize(this.path)).toString() }
+		}
 	}
 }
 
 object URIUtils {
-	fun isAbsolute(base: String): Boolean = base.contains("://")
+	@Deprecated("", ReplaceWith("URL.isAbsolute(base)"))
+	fun isAbsolute(base: String): Boolean = URL.isAbsolute(base)
 
-	fun resolve(base: String, access: String): String = if (isAbsolute(access)) {
-		access
-	} else {
-		val url = URL(base + "/" + access)
-		url.copy(path = VfsUtil.normalize(url.path)).toString()
-	}
+	@Deprecated("", ReplaceWith("URL.resolve(base, access)"))
+	fun resolve(base: String, access: String): String = URL.resolve(base, access)
 }

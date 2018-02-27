@@ -16,11 +16,10 @@ fun <T> Continuation<T>.toEventLoop(): Continuation<T> {
 	return object : Continuation<T> {
 		override val context: CoroutineContext = parent.context
 		override fun resume(value: T): Unit = run {
-			context.eventLoop.queue { parent.resume(value) }
+			context.eventLoop.queueContinuation(parent, value)
 		}
 		override fun resumeWithException(exception: Throwable): Unit = run {
-			val e = ExceptionHook.hook(exception)
-			context.eventLoop.queue { parent.resumeWithException(e) }
+			context.eventLoop.queueContinuationException(parent, ExceptionHook.hook(exception))
 		}
 	}
 }
@@ -33,8 +32,8 @@ interface CheckRunning {
 
 val CheckRunning.eventLoop get() = coroutineContext.eventLoop
 
-suspend fun parallel(vararg tasks: suspend () -> Unit) = withCoroutineContext {
-	tasks.map { go(this@withCoroutineContext, it) }.await()
+suspend fun parallel(vararg tasks: suspend () -> Unit) {
+	tasks.map { go(getCoroutineContext(), it) }.await()
 }
 
 fun <T> spawn(context: CoroutineContext, task: suspend () -> T): Promise<T> {
@@ -43,10 +42,10 @@ fun <T> spawn(context: CoroutineContext, task: suspend () -> T): Promise<T> {
 	return deferred.promise
 }
 
-suspend fun <T> spawn(task: suspend () -> T): Promise<T> = withCoroutineContext {
+suspend fun <T> spawn(task: suspend () -> T): Promise<T> {
 	val deferred = Promise.Deferred<T>()
-	task.korioStartCoroutine(deferred.toContinuation(this@withCoroutineContext))
-	return@withCoroutineContext deferred.promise
+	task.korioStartCoroutine(deferred.toContinuation(getCoroutineContext()))
+	return deferred.promise
 }
 
 interface CoroutineContextHolder {
@@ -63,8 +62,10 @@ fun <T> CoroutineContextHolder.go(task: suspend () -> T): Promise<T> = spawn(thi
 fun <T> CoroutineContextHolder.async(task: suspend () -> T): Promise<T> = spawn(this.coroutineContext, task)
 fun <T> CoroutineContextHolder.spawn(task: suspend () -> T): Promise<T> = spawn(this.coroutineContext, task)
 
-suspend fun <T> async(task: suspend CoroutineContext.() -> T): Promise<T> = withCoroutineContext { spawn(this@withCoroutineContext) { task(this@withCoroutineContext) } }
-suspend fun <T> go(task: suspend CoroutineContext.() -> T): Promise<T> = withCoroutineContext { spawn(this@withCoroutineContext) { task(this@withCoroutineContext) } }
+suspend fun <T> async2(task: suspend () -> T): Promise<T> = spawn { task() }
+
+suspend fun <T> async(task: suspend CoroutineContext.() -> T): Promise<T> = spawn { task(getCoroutineContext()) }
+suspend fun <T> go(task: suspend CoroutineContext.() -> T): Promise<T> = spawn { task(getCoroutineContext()) }
 
 fun <T> EventLoop.async(task: suspend CoroutineContext.() -> T): Promise<T> = spawn(this@async.coroutineContext) { task(this@async.coroutineContext) }
 fun <T> CoroutineContext.async(task: suspend CoroutineContext.() -> T): Promise<T> = spawn(this@async) { task(this@async) }
@@ -98,14 +99,20 @@ class EmptyContinuation(override val context: CoroutineContext) : Continuation<A
 @Suppress("UNCHECKED_CAST")
 inline fun <T> spawnAndForget(context: CoroutineContext, noinline task: suspend () -> T): Unit = task.korioStartCoroutine(EmptyContinuation(context) as Continuation<T>)
 
-suspend fun <T> spawnAndForget(task: suspend () -> T): Unit = withCoroutineContext { spawnAndForget(this@withCoroutineContext, task) }
+suspend fun <T> spawnAndForget(task: suspend () -> T): Unit = spawnAndForget(getCoroutineContext(), task)
 
 inline fun <T> spawnAndForget(context: CoroutineContext, value: T, noinline task: suspend T.() -> Any): Unit = task.korioStartCoroutine(value, EmptyContinuation(context))
 
 //fun syncTest(callback: suspend EventLoopTest.() -> Unit): Unit = TODO()
 
-fun syncTest(block: suspend EventLoopTest.() -> Unit): Unit = KorioNative.syncTest(block)
-fun syncTestIgnoreJs(block: suspend EventLoopTest.() -> Unit): Unit {
+@Deprecated("", ReplaceWith("suspendTest(block)"))
+fun syncTest(block: suspend EventLoopTest.() -> Unit): Unit = suspendTest(block)
+
+@Deprecated("", ReplaceWith("suspendTest(block)"))
+fun syncTestIgnoreJs(block: suspend EventLoopTest.() -> Unit): Unit = suspendTestIgnoreJs(block)
+
+fun suspendTest(block: suspend EventLoopTest.() -> Unit): Unit = KorioNative.syncTest(block)
+fun suspendTestIgnoreJs(block: suspend EventLoopTest.() -> Unit): Unit {
 	if (!OS.isJs) {
 		KorioNative.syncTest(block)
 	}
@@ -125,8 +132,8 @@ fun <TEventLoop : EventLoop> sync(el: TEventLoop, step: Int = 10, block: suspend
 		}
 
 		override fun resumeWithException(exception: Throwable) = run {
-			val e = ExceptionHook.hook(exception)
 			tasksInProgress.decrementAndGet()
+			val e = ExceptionHook.hook(exception)
 			result = e
 		}
 	})
@@ -135,10 +142,12 @@ fun <TEventLoop : EventLoop> sync(el: TEventLoop, step: Int = 10, block: suspend
 		Thread_sleep(1L)
 		el.step(step)
 	}
+
 	if (result is Throwable) throw result as Throwable
 	return Unit
 }
 
+/*
 // Wait for a suspension block for testing purposes
 fun <T> sync(block: suspend () -> T): T {
 	if (OS.isJs) throw UnsupportedOperationException("sync block is not supported on javascript target. It is intended for testing.")
@@ -166,5 +175,7 @@ fun <T> sync(block: suspend () -> T): T {
 	@Suppress("UNCHECKED_CAST")
 	return result as T
 }
+*/
 
 fun Thread_sleep(time: Long): Unit = KorioNative.Thread_sleep(time)
+fun sleepBlocking(time: Long): Unit = KorioNative.Thread_sleep(time)

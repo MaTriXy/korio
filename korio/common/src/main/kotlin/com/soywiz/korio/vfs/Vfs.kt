@@ -2,17 +2,17 @@
 
 package com.soywiz.korio.vfs
 
-import com.soywiz.korio.async.AsyncSequence
+import com.soywiz.korio.async.SuspendingSequence
 import com.soywiz.korio.async.asyncGenerate
 import com.soywiz.korio.async.spawn
-import com.soywiz.korio.coroutine.withCoroutineContext
+import com.soywiz.korio.async.toAsync
 import com.soywiz.korio.error.invalidOp
 import com.soywiz.korio.error.unsupported
 import com.soywiz.korio.lang.Closeable
-import kotlin.reflect.KClass
 import com.soywiz.korio.stream.*
 import com.soywiz.korio.util.use
 import kotlin.math.min
+import kotlin.reflect.KClass
 
 abstract class Vfs {
 	open protected val absolutePath: String = ""
@@ -28,20 +28,25 @@ abstract class Vfs {
 	fun file(path: String) = root[path]
 
 	fun createExistsStat(
-		path: String, isDirectory: Boolean, size: Long, device: Long = -1, inode: Long = -1, mode: Int = 511,
-		owner: String = "nobody", group: String = "nobody", createTime: Long = 0L, modifiedTime: Long = createTime, lastAccessTime: Long = modifiedTime,
-		extraInfo: Any? = null
+			path: String, isDirectory: Boolean, size: Long, device: Long = -1, inode: Long = -1, mode: Int = 511,
+			owner: String = "nobody", group: String = "nobody", createTime: Long = 0L, modifiedTime: Long = createTime,
+			lastAccessTime: Long = modifiedTime, extraInfo: Any? = null
 	) = VfsStat(
-		file = file(path), exists = true, isDirectory = isDirectory, size = size, device = device, inode = inode, mode = mode,
-		owner = owner, group = group, createTime = createTime, modifiedTime = modifiedTime, lastAccessTime = lastAccessTime,
-		extraInfo = extraInfo
+			file = file(path), exists = true, isDirectory = isDirectory, size = size, device = device, inode = inode,
+			mode = mode, owner = owner, group = group, createTime = createTime, modifiedTime = modifiedTime,
+			lastAccessTime = lastAccessTime, extraInfo = extraInfo
 	)
 
-	fun createNonExistsStat(path: String, extraInfo: Any? = null) = VfsStat(file(path), exists = false, isDirectory = false, size = 0L, device = -1L, inode = -1L, mode = 511, owner = "nobody", group = "nobody", createTime = 0L, modifiedTime = 0L, lastAccessTime = 0L, extraInfo = extraInfo)
+	fun createNonExistsStat(path: String, extraInfo: Any? = null) = VfsStat(
+			file = file(path), exists = false, isDirectory = false, size = 0L,
+			device = -1L, inode = -1L, mode = 511, owner = "nobody", group = "nobody",
+			createTime = 0L, modifiedTime = 0L, lastAccessTime = 0L, extraInfo = extraInfo
+	)
 
-	suspend open fun <T : Any> readSpecial(path: String, clazz: KClass<T>): T {
-		return (vfsSpecialReadersMap[clazz]?.readSpecial(this, path) as T) ?: invalidOp("Don't know how to readSpecial $clazz")
-	}
+	@Suppress("UNCHECKED_CAST")
+	suspend open fun <T : Any> readSpecial(path: String, clazz: KClass<T>): T =
+			(vfsSpecialReadersMap[clazz]?.readSpecial(this, path) as? T?)
+					?: invalidOp("Don't know how to readSpecial $clazz")
 
 	suspend open fun exec(path: String, cmdAndArgs: List<String>, handler: VfsProcessHandler = VfsProcessHandler()): Int = throw UnsupportedOperationException()
 	suspend open fun exec(path: String, cmdAndArgs: List<String>, env: Map<String, String>, handler: VfsProcessHandler = VfsProcessHandler()): Int = throw UnsupportedOperationException()
@@ -67,7 +72,7 @@ abstract class Vfs {
 		try {
 			s.position = range.start
 			val readCount = min(Int.MAX_VALUE.toLong() - 1,
-				(range.endInclusive - range.start)
+					(range.endInclusive - range.start)
 			).toInt() + 1
 
 			return s.readBytesUpTo(readCount)
@@ -86,6 +91,10 @@ abstract class Vfs {
 		}
 	}
 
+	suspend fun put(path: String, content: ByteArray, attributes: List<Attribute> = listOf()): Long {
+		return put(path, content.openAsync(), attributes)
+	}
+
 	suspend fun readChunk(path: String, offset: Long, size: Int): ByteArray {
 		val s = open(path, VfsOpenMode.READ)
 		if (offset != 0L) s.setPosition(offset)
@@ -93,10 +102,9 @@ abstract class Vfs {
 	}
 
 	suspend fun writeChunk(path: String, data: ByteArray, offset: Long, resize: Boolean): Unit {
-		val s = open(path, VfsOpenMode.CREATE)
+		val s = open(path, if (resize) VfsOpenMode.CREATE_OR_TRUNCATE else VfsOpenMode.CREATE)
 		s.setPosition(offset)
 		s.writeBytes(data)
-		if (resize) s.setLength(s.getPosition())
 	}
 
 	suspend open fun setSize(path: String, size: Long): Unit {
@@ -106,11 +114,16 @@ abstract class Vfs {
 	suspend open fun setAttributes(path: String, attributes: List<Attribute>): Unit = Unit
 
 	suspend open fun stat(path: String): VfsStat = createNonExistsStat(path)
-	suspend open fun list(path: String): AsyncSequence<VfsFile> = withCoroutineContext { return@withCoroutineContext asyncGenerate<VfsFile>(this@withCoroutineContext) { } }
+	suspend open fun list(path: String): SuspendingSequence<VfsFile> = listOf<VfsFile>().toAsync()
 	suspend open fun mkdir(path: String, attributes: List<Attribute>): Boolean = unsupported()
 	suspend open fun rmdir(path: String): Boolean = delete(path) // For compatibility
 	suspend open fun delete(path: String): Boolean = unsupported()
-	suspend open fun rename(src: String, dst: String): Boolean = unsupported()
+	suspend open fun rename(src: String, dst: String): Boolean {
+		file(src).copyTo(file(dst))
+		delete(src)
+		return true
+	}
+
 	suspend open fun watch(path: String, handler: (VfsFileEvent) -> Unit): Closeable = Closeable { }
 
 	suspend open fun touch(path: String, time: Long, atime: Long) {
@@ -144,7 +157,7 @@ abstract class Vfs {
 		suspend override fun put(path: String, content: AsyncInputStream, attributes: List<Attribute>) = initOnce().access(path).put(content, *attributes.toTypedArray())
 		suspend override fun setSize(path: String, size: Long): Unit = initOnce().access(path).setSize(size)
 		suspend override fun stat(path: String): VfsStat = initOnce().access(path).stat().copy(file = file(path))
-		suspend override fun list(path: String) = withCoroutineContext { asyncGenerate<VfsFile>(this@withCoroutineContext) { initOnce(); for (it in access(path).list()) yield(transform(it)) } }
+		suspend override fun list(path: String) = asyncGenerate { initOnce(); for (it in access(path).list()) yield(transform(it)) }
 		suspend override fun delete(path: String): Boolean = initOnce().access(path).delete()
 		suspend override fun setAttributes(path: String, attributes: List<Attribute>) = initOnce().access(path).setAttributes(*attributes.toTypedArray())
 		suspend override fun mkdir(path: String, attributes: List<Attribute>): Boolean = initOnce().access(path).mkdir(*attributes.toTypedArray())
@@ -157,10 +170,10 @@ abstract class Vfs {
 			return srcFile.renameTo(dstFile.path)
 		}
 
-		suspend override fun watch(path: String, handler: (VfsFileEvent) -> Unit): Closeable = withCoroutineContext {
+		suspend override fun watch(path: String, handler: (VfsFileEvent) -> Unit): Closeable {
 			initOnce()
-			return@withCoroutineContext access(path).watch { e ->
-				spawn(this@withCoroutineContext) {
+			return access(path).watch { e ->
+				spawn {
 					val f1 = e.file.transform2()
 					val f2 = e.other?.transform2()
 					handler(e.copy(file = f1, other = f2))

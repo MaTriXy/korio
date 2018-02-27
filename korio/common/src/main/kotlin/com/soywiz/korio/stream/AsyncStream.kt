@@ -5,13 +5,16 @@ package com.soywiz.korio.stream
 import com.soywiz.kds.Extra
 import com.soywiz.kmem.*
 import com.soywiz.korio.EOFException
+import com.soywiz.korio.JvmOverloads
 import com.soywiz.korio.async.AsyncThread
 import com.soywiz.korio.async.executeInWorker
+import com.soywiz.korio.error.invalidOp
 import com.soywiz.korio.lang.*
 import com.soywiz.korio.util.*
 import com.soywiz.korio.vfs.MemoryVfs
 import com.soywiz.korio.vfs.VfsFile
 import com.soywiz.korio.vfs.VfsOpenMode
+import kotlin.math.max
 import kotlin.math.min
 
 //interface SmallTemp {
@@ -34,14 +37,20 @@ interface AsyncOutputStream : AsyncBaseStream {
 	suspend fun write(buffer: ByteArray, offset: Int = 0, len: Int = buffer.size - offset)
 }
 
-interface AsyncPositionStream : AsyncBaseStream {
-	suspend fun setPosition(value: Long): Unit = throw UnsupportedOperationException()
+interface AsyncGetPositionStream : AsyncBaseStream {
 	suspend fun getPosition(): Long = throw UnsupportedOperationException()
 }
 
-interface AsyncLengthStream : AsyncBaseStream {
-	suspend fun setLength(value: Long): Unit = throw UnsupportedOperationException()
+interface AsyncPositionStream : AsyncGetPositionStream {
+	suspend fun setPosition(value: Long): Unit = throw UnsupportedOperationException()
+}
+
+interface AsyncGetLengthStream : AsyncBaseStream {
 	suspend fun getLength(): Long = throw UnsupportedOperationException()
+}
+
+interface AsyncLengthStream : AsyncGetLengthStream {
+	suspend fun setLength(value: Long): Unit = throw UnsupportedOperationException()
 }
 
 interface AsyncPositionLengthStream : AsyncPositionStream, AsyncLengthStream {
@@ -180,38 +189,42 @@ class SliceAsyncStreamBase(internal val base: AsyncStreamBase, internal val base
 
 fun AsyncStream.buffered(blockSize: Int = 2048) = BufferedStreamBase(this.base, blockSize).toAsyncStream(this.position)
 
-class BufferedStreamBase(val base: AsyncStreamBase, val blockSize: Int = 2048) : AsyncStreamBase() {
+class BufferedStreamBase(val base: AsyncStreamBase, val blockSize: Int = 2048, val blocksToRead: Int = 0x10) : AsyncStreamBase() {
 	fun getSectorPosition(sector: Long): Long = sector * blockSize
 	fun getSectorAtPosition(position: Long): Long = position / blockSize
 
-	inner class CachedEntry(val startSector: Long, val endSector: Long, val data: ByteArray) {
-		val startPosition = getSectorPosition(startSector)
-		val endPosition = getSectorPosition(endSector)
+	inner class CachedEntry(val startPosition: Long, val data: ByteArray) {
+		val endPosition = startPosition + data.size
+		val range = startPosition until endPosition
 
 		fun getPositionInData(position: Long): Int = (position - startPosition).toIntSafe()
 		fun getAvailableAtPosition(position: Long): Int = data.size - getPositionInData(position)
 
-		fun containsSectors(startSector: Long, endSector: Long): Boolean = (startSector >= this.startSector && endSector <= this.endSector)
+		override fun toString(): String = "CachedEntry($startPosition-$endPosition)"
 	}
 
 	suspend fun readSectorsUncached(start: Long, end: Long): ByteArray {
 		val length = end - start
 		val out = ByteArray((blockSize * length).toInt())
-		val r = base.read(getSectorPosition(start), out, 0, out.size)
-		return out.copyOf(r)
+		val read = base.read(getSectorPosition(start), out, 0, out.size)
+		return out.copyOf(read)
 	}
 
 	var cached: CachedEntry? = null
 
-	suspend fun readSectorsCached(start: Long, end: Long): CachedEntry {
-		if (!(cached?.containsSectors(start, end) ?: false)) {
-			cached = CachedEntry(start, end, readSectorsUncached(start, end))
+	suspend fun getCacheEntry(start: Long, end: Long): CachedEntry {
+		val startSector = getSectorAtPosition(start)
+		val endSector = getSectorAtPosition(end + 1)
+		val c = cached
+		if (c == null || start !in c.range || c.getAvailableAtPosition(start) <= 0) {
+			cached = CachedEntry(start, readSectorsUncached(startSector, max(startSector + blocksToRead, endSector)))
 		}
 		return cached!!
 	}
 
 	suspend override fun read(position: Long, buffer: ByteArray, offset: Int, len: Int): Int {
-		val entry = readSectorsCached(getSectorAtPosition(position), getSectorAtPosition(position + len) + 1)
+		if (position >= base.getLength()) return -1
+		val entry = getCacheEntry(position, position + len)
 		val readOffset = entry.getPositionInData(position)
 		val readLen = min(entry.getAvailableAtPosition(position), len)
 		arraycopy(entry.data, readOffset, buffer, offset, readLen)
@@ -225,10 +238,6 @@ class BufferedStreamBase(val base: AsyncStreamBase, val blockSize: Int = 2048) :
 	suspend override fun setLength(value: Long) = base.setLength(value)
 	suspend override fun getLength(): Long = base.getLength()
 	suspend override fun close() = base.close()
-}
-
-suspend fun AsyncStream.sliceWithStart(start: Long): AsyncStream {
-	return sliceWithBounds(start, this.getLength())
 }
 
 suspend fun AsyncStream.sliceWithSize(start: Long, length: Long): AsyncStream = sliceWithBounds(start, start + length)
@@ -249,7 +258,12 @@ suspend fun AsyncStream.sliceWithBounds(start: Long, end: Long): AsyncStream {
 	}
 }
 
+@Deprecated("Replace with sliceStart", ReplaceWith("sliceStart"))
 suspend fun AsyncStream.slice(): AsyncStream = this.sliceWithSize(0L, this.getLength())
+
+suspend fun AsyncStream.sliceWithStart(start: Long): AsyncStream = sliceWithBounds(start, this.getLength())
+suspend fun AsyncStream.sliceStart(): AsyncStream = this.sliceWithSize(0L, this.getLength())
+suspend fun AsyncStream.sliceHere(): AsyncStream = this.sliceWithSize(position, this.getLength())
 
 suspend fun AsyncStream.readSlice(length: Long): AsyncStream {
 	val start = getPosition()
@@ -289,10 +303,11 @@ suspend fun AsyncOutputStream.writeString(string: String, charset: Charset = Cha
 suspend fun AsyncInputStream.readExact(buffer: ByteArray, offset: Int, len: Int) {
 	var remaining = len
 	var coffset = offset
+	val reader = this
 	while (remaining > 0) {
-		val read = read(buffer, coffset, remaining)
+		val read = reader.read(buffer, coffset, remaining)
 		if (read < 0) break
-		if (read == 0) throw com.soywiz.korio.EOFException("Not enough data")
+		if (read == 0) throw com.soywiz.korio.EOFException("Not enough data. Expected=$len, Read=${len - remaining}, Remaining=$remaining")
 		coffset += read
 		remaining -= read
 	}
@@ -405,7 +420,10 @@ suspend fun AsyncStream.hasAvailable(): Boolean = try {
 
 suspend fun AsyncInputStream.readAll(): ByteArray {
 	return try {
-		if (this is AsyncStream && this.hasAvailable()) {
+		if (this is AsyncGetPositionStream && this is AsyncGetLengthStream) {
+			val available = this.getLength() - this.getPosition()
+			return this.readBytesExact(available.toInt())
+		} else if (this is AsyncStream && this.hasAvailable()) {
 			val available = this.getAvailable().toInt()
 			return this.readBytesExact(available)
 		} else {
@@ -473,7 +491,10 @@ suspend fun AsyncOutputStream.writeF32_be(v: Float): Unit = write(ByteArray(4).a
 suspend fun AsyncOutputStream.writeF64_be(v: Double): Unit = write(ByteArray(8).apply { this@apply.writeF64_be(0, v) }, 0, 8)
 
 fun SyncStream.toAsync(): AsyncStream = this.base.toAsync().toAsyncStream(this.position)
-fun SyncStreamBase.toAsync(): AsyncStreamBase = SyncAsyncStreamBase(this)
+fun SyncStreamBase.toAsync(): AsyncStreamBase = when (this) {
+    is MemorySyncStreamBase -> MemoryAsyncStreamBase(this.data)
+    else -> SyncAsyncStreamBase(this)
+}
 
 fun SyncStream.toAsyncInWorker(): AsyncStream = this.base.toAsyncInWorker().toAsyncStream(this.position)
 fun SyncStreamBase.toAsyncInWorker(): AsyncStreamBase = SyncAsyncStreamBaseInWorker(this)
@@ -495,24 +516,22 @@ class SyncAsyncStreamBaseInWorker(val sync: SyncStreamBase) : AsyncStreamBase() 
 suspend fun AsyncOutputStream.writeStream(source: AsyncInputStream): Long = source.copyTo(this)
 suspend fun AsyncOutputStream.writeFile(source: VfsFile): Long = source.openUse(VfsOpenMode.READ) { this@writeFile.writeStream(this) }
 
-suspend fun AsyncInputStream.copyTo(target: AsyncOutputStream): Long {
-	val chunk = ByteArray(0x1000)
+@JvmOverloads
+suspend fun AsyncInputStream.copyTo(target: AsyncOutputStream, chunkSize: Int = 0x10000): Long {
+	// Optimization to reduce suspensions
+	if (this is AsyncStream && base is MemoryAsyncStreamBase) {
+		target.write(base.data.data, position.toInt(), base.ilength - position.toInt())
+		return base.ilength.toLong()
+	}
+
+	val chunk = ByteArray(chunkSize)
 	var totalCount = 0L
-
-	//if (this is AsyncPositionLengthStream) {
-	//	println("Position: " + this.getPosition())
-	//	println("Length: " + this.getLength())
-	//	println("Available: " + this.getAvailable())
-	//}
-
 	while (true) {
 		val count = this.read(chunk)
 		if (count <= 0) break
 		target.write(chunk, 0, count)
 		totalCount += count
 	}
-	//println("Copied: $totalCount, chunkSize: ${chunk.size}")
-	//Unit
 	return totalCount
 }
 
@@ -543,7 +562,7 @@ suspend fun AsyncOutputStream.writeDoubleArray_be(array: DoubleArray) = writeByt
 
 suspend fun AsyncInputStream.readUntil(endByte: Byte, limit: Int = 0x1000): ByteArray {
 	val temp = ByteArray(1)
-	val out = ByteArrayBuilderSmall()
+	val out = ByteArrayBuilder()
 	try {
 		while (true) {
 			val c = run { readExact(temp, 0, 1); temp[0] }
@@ -560,7 +579,7 @@ suspend fun AsyncInputStream.readUntil(endByte: Byte, limit: Int = 0x1000): Byte
 
 suspend fun AsyncInputStream.readLine(eol: Char = '\n', charset: Charset = Charsets.UTF_8): String {
 	val temp = ByteArray(1)
-	val out = ByteArrayBuilderSmall()
+	val out = ByteArrayBuilder()
 	try {
 		while (true) {
 			val c = run { readExact(temp, 0, 1); temp[0] }
@@ -585,3 +604,66 @@ fun SyncOutputStream.toAsyncOutputStream() = object : AsyncOutputStream {
 }
 
 fun AsyncStream.asVfsFile(name: String = "unknown.bin"): VfsFile = MemoryVfs(mapOf(name to this))[name]
+
+suspend fun AsyncStream.readAllAsFastStream(offset: Int = 0) = this.readAll().openFastStream()
+
+inline fun AsyncStream.getWrittenRange(callback: () -> Unit): LongRange {
+	val start = position
+	callback()
+	val end = position
+	return start until end
+}
+
+// Missing methods from Korio's AsyncStream
+suspend fun AsyncStream.writeU_VL(value: Int) =
+		this.apply { writeBytes(MemorySyncStreamToByteArray { writeU_VL(value) }) }
+
+suspend fun AsyncStream.writeStringVL(str: String, charset: Charset = UTF8) =
+		this.apply { writeBytes(MemorySyncStreamToByteArray { writeStringVL(str, charset) }) }
+
+fun AsyncInputStream.withLength(length: Long): AsyncInputStream {
+	val base = this
+	var currentPos = 0L
+	return object : AsyncInputStream by base, AsyncGetLengthStream, AsyncGetPositionStream {
+		suspend override fun read(buffer: ByteArray, offset: Int, len: Int): Int {
+			val read = base.read(buffer, offset, len)
+			if (read >= 0) currentPos += read
+			return read
+		}
+
+		suspend override fun getPosition(): Long = currentPos
+		suspend override fun getLength(): Long = length
+	}
+}
+
+class MemoryAsyncStreamBase(var data: ByteArrayBuffer) : AsyncStreamBase() {
+	constructor(initialCapacity: Int = 4096) : this(ByteArrayBuffer(initialCapacity))
+
+	var ilength: Int
+		get() = data.size
+		set(value) = run { data.size = value }
+
+	suspend override fun setLength(value: Long) = run { ilength = value.toInt() }
+	suspend override fun getLength(): Long = ilength.toLong()
+
+	fun checkPosition(position: Long) = run { if (position < 0) invalidOp("Invalid position $position") }
+
+	override suspend fun read(position: Long, buffer: ByteArray, offset: Int, len: Int): Int {
+		checkPosition(position)
+		if (position !in 0 until ilength) return 0
+		val end = min(this.ilength.toLong(), position + len)
+		val actualLen = max((end - position).toInt(), 0)
+		arraycopy(this.data.data, position.toInt(), buffer, offset, actualLen)
+		return actualLen
+	}
+
+	override suspend fun write(position: Long, buffer: ByteArray, offset: Int, len: Int) {
+		checkPosition(position)
+		data.ensure((position + len).toInt())
+		arraycopy(buffer, offset, this.data.data, position.toInt(), len)
+	}
+
+	override suspend fun close() = Unit
+
+	override fun toString(): String = "MemoryAsyncStreamBase(${data.size})"
+}
