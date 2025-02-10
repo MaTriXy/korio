@@ -3,7 +3,10 @@
 /build
 /out
 /classes
-/log.txt
-*.iml
+/web
+/local.properties
 *.ipr
 *.iws
+*.iml
+*.hprof
+

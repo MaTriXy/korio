@@ -1,17 +1,11 @@
-rootProject.name = 'korio-root'
+rootProject.name = rootDir.name + "-root"
 
-include(
-		'korio-common',
-		'korio',
-		'korio-android',
-		'korio-js',
-)
-
-def register(String base) {
-	findProject(":$base-common")?.projectDir = file("$base/common")
-	findProject(":$base")?.projectDir = file("$base/jvm")
-	findProject(":$base-android")?.projectDir = file("$base/android")
-	findProject(":$base-js")?.projectDir = file("$base/js")
+for (file in rootDir.listFiles()) {
+    if (file.name == "build" || file.name == "buildSrc" || file.name.startsWith(".")) continue
+    if (
+		["build.gradle", "build.gradle.kts"].collect { new File(file, it) }.any { it.exists() } &&
+		["settings.gradle", "settings.gradle.kts"].collect { new File(file, it) }.every { !it.exists() }
+	) {
+		include(":${file.name}")
+    }
 }
-
-register('korio')
